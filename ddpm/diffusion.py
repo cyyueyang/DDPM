@@ -126,14 +126,14 @@ def generate_cosine_schedule(T, s=0.008):
     def f(t, T):
         return np.cos((t / T + s) / (1 + s) * (np.pi / 2.0)) ** 2
 
-    alphas = []
+    alphas_bar = []
     f_0 = f(0, T)
     for t in range(T + 1):
-        alphas.append(f(t, T) / f_0)
+        alphas_bar.append(f(t, T) / f_0)
 
     betas = []
     for t in range(1, T + 1):
-        betas.append(min(1 - alphas[t] / alphas[t-1], 0.999))
+        betas.append(min(1 - alphas_bar[t] / alphas_bar[t-1], 0.999))
 
     return np.array(betas)
 
