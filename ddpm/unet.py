@@ -117,8 +117,146 @@ class ResidualBlock(nn.Module):
         out = self.attention(out)
         return out
 
+class UNet(nn.Module):
+    def __init__(self,
+                 img_channels,
+                 base_channels,
+                 channel_mults=(1, 2, 4, 8),
+                 num_res_blocks=2,
+                 time_emb_dim=None,
+                 time_emb_scale=1.0,
+                 activation=F.relu,
+                 dropout=0.1,
+                 attention_resolution=(),
+                 norm="gn",
+                 groups=32,
+                 init_padding=0,
+                 use_attention=False):
+        super(UNet, self).__init__()
+
+        self.activation = activation
+        self.init_padding = init_padding
+
+        self.time_mlp = nn.Sequential(
+            PositionalEmbedding(base_channels, time_emb_scale),
+            nn.Linear(base_channels, time_emb_dim),
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, time_emb_dim)
+        ) if time_emb_dim is not None else None
+
+        self.init_conv = nn.Conv2d(img_channels, base_channels, kernel_size=3, padding=1)
+
+        self.downs = nn.ModuleList()
+        self.ups = nn.ModuleList()
+
+        channels = [base_channels]
+        now_channels = base_channels
+
+        for i, mult in enumerate(channel_mults):
+            out_channels = base_channels * mult
+            for _ in range(num_res_blocks):
+                self.downs.append(ResidualBlock(
+                    now_channels,
+                    out_channels,
+                    norm=norm,
+                    groups=groups,
+                    dropout=dropout,
+                    activation=self.activation,
+                    time_emb_dim=time_emb_dim,
+                    use_attention=i in attention_resolution()
+                ))
+
+                now_channels = out_channels
+                channels.append(out_channels)
+
+            if i != len(channel_mults) - 1:
+                self.downs.append(Downsample(now_channels))
+                channels.append(now_channels)
+
+        self.mid = nn.ModuleList([
+            ResidualBlock(
+                now_channels,
+                now_channels,
+                norm=norm,
+                groups=groups,
+                dropout=dropout,
+                activation=self.activation,
+                time_emb_dim=time_emb_dim,
+                use_attention=False
+            ),
+            ResidualBlock(
+                now_channels,
+                now_channels,
+                norm=norm,
+                groups=groups,
+                dropout=dropout,
+                activation=self.activation,
+                time_emb_dim=time_emb_dim,
+                use_attention=False
+            )
+        ])
+
+        for i, mult in reversed(list(enumerate(channels))):
+            out_channels = base_channels * mult
+
+            for _ in range(num_res_blocks+1):
+                self.ups.append(
+                    ResidualBlock(
+                        channels.pop() + now_channels,
+                        out_channels,
+                        norm=norm,
+                        groups=groups,
+                        dropout=dropout,
+                        activation=self.activation,
+                        time_emb_dim=time_emb_dim,
+                        use_attention=i in attention_resolution()
+                    )
+                )
+                now_channels = out_channels
+
+                if i != 0:
+                    self.ups.append(
+                        Upsample(now_channels)
+                    )
+        assert len(channels) == 0
+
+        self.out_norm = get_norm(norm, base_channels, groups)
+        self.out_conv = nn.Conv2d(base_channels, img_channels, kernel_size=3, padding=1)
 
 
+    def forward(self, x, time=None):
+        ip = self.init_padding
+
+        if ip != 0:
+            x = F.pad(x, (ip,) * 4)
+
+        if self.time_mlp is not None:
+            if time is not None:
+                time_emb = self.time_mlp(time)
+            else:
+                raise ValueError("time_emb must not be None if time_mlp is True")
+        else:
+            time_emb = None
+
+        x = self.init_conv(x)
+
+        skips = [x]
+
+        for layer in self.downs:
+            x = layer(x, time_emb=time_emb)
+            skips.append(x)
+        for layer in self.mid:
+            x = layer(x, time_emb=time_emb)
+        for layer in self.ups:
+            if isinstance(layer, ResidualBlock):
+                x = torch.cat([x, skips.pop()], dim=1)
+            x = layer(x, time_emb=time_emb)
+
+        x = self.activation(self.out_norm(x))
+        x = self.out_conv(x)
+        if self.init_padding != 0:
+            return x[:, :, ip:-ip, ip:-ip]
+        return x
 
 
 
