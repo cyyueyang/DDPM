@@ -1,8 +1,5 @@
 import argparse
 import torch
-from jinja2 import optimizer
-from networkx.algorithms.similarity import optimize_graph_edit_distance
-
 from ddpm import script_utils
 from torch.utils.data import DataLoader
 from torchvision import datasets
